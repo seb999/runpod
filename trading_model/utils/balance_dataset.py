@@ -81,18 +81,31 @@ def balance_dataset(
     print(f"   UP:       {target_up:7,}")
     print(f"   Total:    {total_target:7,}")
 
-    # Sample from each class
-    print(f"\n5. Sampling from each class...")
+    # Sample from each class - PRESERVE TIME ORDER
+    print(f"\n5. Sampling from each class (preserving time order)...")
 
-    down_samples = df[df['label'] == 'DOWN'].sample(n=min(target_down, len(df[df['label'] == 'DOWN'])), random_state=random_seed)
-    sideways_samples = df[df['label'] == 'SIDEWAYS'].sample(n=min(target_sideways, len(df[df['label'] == 'SIDEWAYS'])), random_state=random_seed)
-    up_samples = df[df['label'] == 'UP'].sample(n=min(target_up, len(df[df['label'] == 'UP'])), random_state=random_seed)
+    # Get indices for each class
+    down_indices = df[df['label'] == 'DOWN'].index.tolist()
+    sideways_indices = df[df['label'] == 'SIDEWAYS'].index.tolist()
+    up_indices = df[df['label'] == 'UP'].index.tolist()
 
-    # Combine
-    balanced_df = pd.concat([down_samples, sideways_samples, up_samples], ignore_index=True)
+    # Randomly sample indices
+    np.random.shuffle(down_indices)
+    np.random.shuffle(sideways_indices)
+    np.random.shuffle(up_indices)
 
-    # Shuffle
-    balanced_df = balanced_df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
+    selected_down = down_indices[:min(target_down, len(down_indices))]
+    selected_sideways = sideways_indices[:min(target_sideways, len(sideways_indices))]
+    selected_up = up_indices[:min(target_up, len(up_indices))]
+
+    # Combine indices and sort to preserve time order
+    all_selected_indices = selected_down + selected_sideways + selected_up
+    all_selected_indices.sort()
+
+    # Select rows maintaining time order
+    balanced_df = df.loc[all_selected_indices].reset_index(drop=True)
+
+    print(f"   ✓ Selected {len(balanced_df)} candles in chronological order")
 
     # Remove the temporary label columns (training script will recalculate)
     balanced_df = balanced_df.drop(columns=['forward_return', 'label'])
