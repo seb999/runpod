@@ -38,7 +38,7 @@ try:
         csv_path='../data/training_data.csv',
         batch_size=16,  # Very small batch
         val_split=0.2,
-        max_rows=None,
+        max_rows=10000,  # Limit to 10K rows for debugging
         lookback=30,  # Smaller lookback
         num_workers=0  # No parallel loading for debugging
     )

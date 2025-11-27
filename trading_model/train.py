@@ -397,23 +397,23 @@ if __name__ == '__main__':
     print("Training LSTM/Transformer Trading Model")
     print("=" * 50)
 
-    # Configuration - Memory-safe GPU settings
-    MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model for GPU
+    # Configuration - RTX 5090 + 117GB RAM (Premium Pod)
+    MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model
     DATA_PATH = '../data/training_data.csv'  # Path relative to trading_model/
     SAVE_DIR = 'checkpoints'
-    BATCH_SIZE = 32  # Conservative batch size to avoid OOM
-    GRADIENT_ACCUM_STEPS = 4  # Simulates batch_size=128 (32*4)
+    BATCH_SIZE = 256  # Large batch for RTX 5090
+    GRADIENT_ACCUM_STEPS = 1  # No need with 33GB VRAM
     EPOCHS = 200  # More epochs with early stopping
     LEARNING_RATE = 0.001
-    LOOKBACK = 50  # Longer context for better predictions
-    NUM_WORKERS = 2  # Reduced workers to save memory
+    LOOKBACK = 100  # Long context for better predictions
+    NUM_WORKERS = 8  # Utilize 15 vCPUs
 
-    # Prepare data - use all available data
+    # Prepare data - use all available data (117GB RAM can handle it)
     train_loader, val_loader, preprocessor = prepare_dataloaders(
         csv_path=DATA_PATH,
         batch_size=BATCH_SIZE,
         val_split=0.2,
-        max_rows=None,  # Use all data
+        max_rows=None,  # Use all 69K rows
         lookback=LOOKBACK,
         num_workers=NUM_WORKERS
     )
@@ -422,24 +422,24 @@ if __name__ == '__main__':
     preprocessor.save(f'{SAVE_DIR}/preprocessor.pkl')
     print(f"Saved preprocessor to {SAVE_DIR}/preprocessor.pkl")
 
-    # Create model - Memory-safe configuration
+    # Create model - Large model for RTX 5090
     input_size = len(preprocessor.feature_columns)
     if MODEL_TYPE == 'transformer_lstm':
         model = create_model(
             model_type=MODEL_TYPE,
             input_size=input_size,
-            hidden_size=128,  # Conservative size to avoid OOM
-            num_lstm_layers=2,
-            num_transformer_layers=2,
-            num_heads=4,
+            hidden_size=512,  # Large model for premium GPU
+            num_lstm_layers=4,
+            num_transformer_layers=6,
+            num_heads=16,
             dropout=0.2
         )
     else:
         model = create_model(
             model_type=MODEL_TYPE,
             input_size=input_size,
-            hidden_size=128,
-            num_layers=2,
+            hidden_size=256,
+            num_layers=4,
             dropout=0.2
         )
 
