@@ -61,8 +61,7 @@ class TradingModelTrainer:
             self.optimizer,
             mode='max',
             patience=5,
-            factor=0.5,
-            verbose=True
+            factor=0.5
         )
 
         # Mixed precision scaler
