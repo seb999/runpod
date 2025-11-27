@@ -324,35 +324,56 @@ def prepare_dataloaders(
         train_loader, val_loader, preprocessor
     """
     # Load data (limit rows to save memory)
+    import sys
+    print("  Step 1/5: Reading CSV file...")
+    sys.stdout.flush()
+
     if max_rows:
         # Read file line count first
         total_rows = sum(1 for _ in open(csv_path)) - 1  # -1 for header
         skip_rows = max(0, total_rows - max_rows)
         if skip_rows > 0:
-            print(f"Loading last {max_rows} rows of {total_rows} total rows (skipping {skip_rows})")
+            print(f"  Loading last {max_rows} rows of {total_rows} total rows (skipping {skip_rows})")
+            sys.stdout.flush()
             df = pd.read_csv(csv_path, skiprows=range(1, skip_rows + 1))
         else:
             df = pd.read_csv(csv_path)
     else:
         df = pd.read_csv(csv_path)
 
+    print(f"  ✓ Loaded {len(df)} rows")
+    sys.stdout.flush()
+
+    print("  Step 2/5: Creating preprocessor...")
+    sys.stdout.flush()
     if preprocessor is None:
-        # Use lookback parameter (reduced to save memory)
         preprocessor = TradingDataPreprocessor(lookback=lookback, forward_bars=5, threshold=0.002)
+    print("  ✓ Preprocessor created")
+    sys.stdout.flush()
 
     # Create features and labels
+    print("  Step 3/5: Creating features and labels...")
+    sys.stdout.flush()
     df = preprocessor.create_features(df)
     df = preprocessor.create_labels(df)
+    print("  ✓ Features and labels created")
+    sys.stdout.flush()
 
     # Create sequences
+    print("  Step 4/5: Creating sequences...")
+    sys.stdout.flush()
     feature_cols = preprocessor.get_feature_columns()
     X, y_class, y_reg = preprocessor.create_sequences(df, feature_cols)
 
-    print(f"Created {len(X)} sequences")
-    print(f"Input shape: {X.shape}")
-    print(f"Label distribution: DOWN={np.sum(y_class==0)}, SIDEWAYS={np.sum(y_class==1)}, UP={np.sum(y_class==2)}")
+    print(f"  ✓ Created {len(X)} sequences")
+    print(f"    Input shape: {X.shape}")
+    print(f"    Label distribution: DOWN={np.sum(y_class==0)}, SIDEWAYS={np.sum(y_class==1)}, UP={np.sum(y_class==2)}")
+    sys.stdout.flush()
 
     # Fit scaler on training data only
+    print("  Step 5/5: Scaling data and creating dataloaders...")
+    sys.stdout.flush()
+
     split_idx = int(len(X) * (1 - val_split))
     X_train_raw = X[:split_idx]
     X_val_raw = X[split_idx:]
@@ -389,78 +410,137 @@ def prepare_dataloaders(
         pin_memory=True
     )
 
+    print(f"  ✓ Created dataloaders")
+    print(f"    Train batches: {len(train_loader)}")
+    print(f"    Val batches: {len(val_loader)}")
+    sys.stdout.flush()
+
     return train_loader, val_loader, preprocessor
 
 
 if __name__ == '__main__':
     # Example usage
+    import sys
+    sys.stdout.flush()  # Ensure output is written immediately
+
     print("Training LSTM/Transformer Trading Model")
     print("=" * 50)
+    sys.stdout.flush()
 
-    # Configuration - RTX 5090 + 117GB RAM (Premium Pod)
+    # Configuration - Conservative start, then optimize
     MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model
     DATA_PATH = '../data/training_data.csv'  # Path relative to trading_model/
     SAVE_DIR = 'checkpoints'
-    BATCH_SIZE = 256  # Large batch for RTX 5090
+    BATCH_SIZE = 128  # Start conservative
     GRADIENT_ACCUM_STEPS = 1  # No need with 33GB VRAM
     EPOCHS = 200  # More epochs with early stopping
     LEARNING_RATE = 0.001
-    LOOKBACK = 100  # Long context for better predictions
-    NUM_WORKERS = 8  # Utilize 15 vCPUs
+    LOOKBACK = 50  # Start with 50, can increase later
+    NUM_WORKERS = 0  # Start with 0 to avoid multiprocessing issues
 
-    # Prepare data - use all available data (117GB RAM can handle it)
-    train_loader, val_loader, preprocessor = prepare_dataloaders(
-        csv_path=DATA_PATH,
-        batch_size=BATCH_SIZE,
-        val_split=0.2,
-        max_rows=None,  # Use all 69K rows
-        lookback=LOOKBACK,
-        num_workers=NUM_WORKERS
-    )
+    print("\n" + "="*60)
+    print("LOADING DATA...")
+    print("="*60)
+    print(f"Data path: {DATA_PATH}")
+    print(f"Lookback: {LOOKBACK}")
+    print(f"Batch size: {BATCH_SIZE}")
+    print()
+
+    try:
+        # Prepare data - use all available data
+        train_loader, val_loader, preprocessor = prepare_dataloaders(
+            csv_path=DATA_PATH,
+            batch_size=BATCH_SIZE,
+            val_split=0.2,
+            max_rows=None,  # Use all 69K rows
+            lookback=LOOKBACK,
+            num_workers=NUM_WORKERS
+        )
+        print("✓ Data loaded successfully!")
+    except Exception as e:
+        print(f"✗ FAILED to load data: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
     # Save preprocessor
+    print("\n" + "="*60)
+    print("SAVING PREPROCESSOR...")
+    print("="*60)
     preprocessor.save(f'{SAVE_DIR}/preprocessor.pkl')
-    print(f"Saved preprocessor to {SAVE_DIR}/preprocessor.pkl")
+    print(f"✓ Saved to {SAVE_DIR}/preprocessor.pkl")
 
-    # Create model - Large model for RTX 5090
+    # Create model - Start with moderate size
+    print("\n" + "="*60)
+    print("CREATING MODEL...")
+    print("="*60)
     input_size = len(preprocessor.feature_columns)
-    if MODEL_TYPE == 'transformer_lstm':
-        model = create_model(
-            model_type=MODEL_TYPE,
-            input_size=input_size,
-            hidden_size=512,  # Large model for premium GPU
-            num_lstm_layers=4,
-            num_transformer_layers=6,
-            num_heads=16,
-            dropout=0.2
+    print(f"Input features: {input_size}")
+
+    try:
+        if MODEL_TYPE == 'transformer_lstm':
+            model = create_model(
+                model_type=MODEL_TYPE,
+                input_size=input_size,
+                hidden_size=256,  # Moderate size
+                num_lstm_layers=2,
+                num_transformer_layers=3,
+                num_heads=8,
+                dropout=0.2
+            )
+        else:
+            model = create_model(
+                model_type=MODEL_TYPE,
+                input_size=input_size,
+                hidden_size=128,
+                num_layers=2,
+                dropout=0.2
+            )
+
+        param_count = sum(p.numel() for p in model.parameters())
+        print(f"✓ Created {MODEL_TYPE} model")
+        print(f"  Parameters: {param_count:,}")
+    except Exception as e:
+        print(f"✗ FAILED to create model: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    # Create trainer
+    print("\n" + "="*60)
+    print("INITIALIZING TRAINER...")
+    print("="*60)
+    try:
+        trainer = TradingModelTrainer(
+            model=model,
+            learning_rate=LEARNING_RATE,
+            gradient_accumulation_steps=GRADIENT_ACCUM_STEPS
         )
-    else:
-        model = create_model(
-            model_type=MODEL_TYPE,
-            input_size=input_size,
-            hidden_size=256,
-            num_layers=4,
-            dropout=0.2
+        print(f"✓ Trainer initialized")
+        print(f"  Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM_STEPS}")
+    except Exception as e:
+        print(f"✗ FAILED to initialize trainer: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    # Train
+    print("\n" + "="*60)
+    print("STARTING TRAINING...")
+    print("="*60)
+    try:
+        history = trainer.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=EPOCHS,
+            save_dir=SAVE_DIR,
+            early_stopping_patience=25
         )
-
-    print(f"\nCreated {MODEL_TYPE} model with {input_size} input features")
-
-    # Create trainer with gradient accumulation
-    trainer = TradingModelTrainer(
-        model=model,
-        learning_rate=LEARNING_RATE,
-        gradient_accumulation_steps=GRADIENT_ACCUM_STEPS
-    )
-
-    print(f"Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM_STEPS} (batch={BATCH_SIZE}, accum={GRADIENT_ACCUM_STEPS})")
-
-    # Train with GPU optimizations
-    history = trainer.train(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        epochs=EPOCHS,
-        save_dir=SAVE_DIR,
-        early_stopping_patience=25  # More patience for larger model
-    )
-
-    print("\nTraining complete!")
+        print("\n" + "="*60)
+        print("TRAINING COMPLETE!")
+        print("="*60)
+    except Exception as e:
+        print(f"\n✗ TRAINING FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
