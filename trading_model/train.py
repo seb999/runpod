@@ -67,9 +67,10 @@ class TradingModelTrainer:
         # Mixed precision scaler
         self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
 
-        # Loss functions
-        self.criterion_class = nn.CrossEntropyLoss()
+        # Loss functions (with class weights for imbalanced data)
+        self.criterion_class = None  # Will be set with weights
         self.criterion_reg = nn.MSELoss()
+        self.class_weights = None
 
         # Training history
         self.history = {
@@ -79,6 +80,37 @@ class TradingModelTrainer:
             'val_f1': [],
             'learning_rate': []
         }
+
+    def set_class_weights(self, train_loader: DataLoader):
+        """
+        Calculate class weights from training data to handle imbalance
+        Inverse frequency weighting: rare classes get higher weight
+        """
+        all_labels = []
+        for _, y_class, _ in train_loader:
+            all_labels.extend(y_class.numpy())
+
+        all_labels = np.array(all_labels)
+
+        # Count each class
+        class_counts = np.bincount(all_labels)
+
+        # Calculate weights: inverse of frequency
+        total = len(all_labels)
+        weights = total / (len(class_counts) * class_counts)
+
+        # Convert to tensor
+        self.class_weights = torch.FloatTensor(weights).to(self.device)
+
+        # Create weighted loss
+        self.criterion_class = nn.CrossEntropyLoss(weight=self.class_weights)
+
+        print(f"\nClass distribution in training data:")
+        for i, (count, weight) in enumerate(zip(class_counts, weights)):
+            class_name = ['DOWN', 'SIDEWAYS', 'UP'][i]
+            pct = (count / total) * 100
+            print(f"  {class_name:10s}: {count:7,} ({pct:5.2f}%) - weight: {weight:.3f}")
+        print()
 
     def train_epoch(self, train_loader: DataLoader) -> float:
         """Train for one epoch with mixed precision and gradient accumulation"""
@@ -232,6 +264,9 @@ class TradingModelTrainer:
         print(f"Training on device: {self.device}")
         print(f"Mixed precision (AMP): {'Enabled' if self.use_amp else 'Disabled'}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+
+        # Calculate class weights to handle imbalanced data
+        self.set_class_weights(train_loader)
 
         for epoch in range(epochs):
             # Train

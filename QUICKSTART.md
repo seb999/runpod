@@ -31,22 +31,17 @@ source venv/bin/activate
 
 ### 2. Collect Training Data
 
-**RECOMMENDED: Fetch multi-year data and balance it**
+**RECOMMENDED: Fetch multi-year data from Binance**
 
-This approach collects data from both bull and bear markets, then balances classes to 1/3-1/3-1/3:
+Collect 5 years of data covering both bull and bear markets. The training script automatically handles class imbalance using weighted loss:
 
 ```bash
-# Step 1: Fetch 5 years of data from Binance (covers both bull and bear markets)
+# Fetch 5 years of data from Binance (covers both bull and bear markets)
 ./venv/bin/python trading_model/utils/collect_data.py \
   --start-date 2020-01-01 \
   --end-date 2025-01-01 \
   --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT \
   --interval 30m \
-  --output data/training_data_raw.csv
-
-# Step 2: Balance the dataset to equal class distribution (1/3 DOWN, 1/3 SIDEWAYS, 1/3 UP)
-./venv/bin/python trading_model/utils/balance_dataset.py \
-  --input data/training_data_raw.csv \
   --output data/training_data.csv
 ```
 
@@ -58,6 +53,8 @@ This approach collects data from both bull and bear markets, then balances class
   --interval 30m \
   --output data/training_data.csv
 ```
+
+**Note:** The model uses class-weighted loss to automatically handle imbalanced data. You don't need to manually balance the dataset.
 
 **Option B: Export from C# Application**
 
