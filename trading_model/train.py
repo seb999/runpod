@@ -42,10 +42,12 @@ class TradingModelTrainer:
         model: nn.Module,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         learning_rate: float = 0.001,
-        weight_decay: float = 1e-5
+        weight_decay: float = 1e-5,
+        use_amp: bool = True  # Mixed precision training
     ):
         self.model = model.to(device)
         self.device = device
+        self.use_amp = use_amp and device == 'cuda'
 
         self.optimizer = optim.AdamW(
             model.parameters(),
@@ -61,6 +63,9 @@ class TradingModelTrainer:
             verbose=True
         )
 
+        # Mixed precision scaler
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+
         # Loss functions
         self.criterion_class = nn.CrossEntropyLoss()
         self.criterion_reg = nn.MSELoss()
@@ -75,37 +80,45 @@ class TradingModelTrainer:
         }
 
     def train_epoch(self, train_loader: DataLoader) -> float:
-        """Train for one epoch"""
+        """Train for one epoch with mixed precision"""
         self.model.train()
         total_loss = 0
         n_batches = 0
 
         for X_batch, y_class_batch, y_reg_batch in train_loader:
-            X_batch = X_batch.to(self.device)
-            y_class_batch = y_class_batch.to(self.device)
-            y_reg_batch = y_reg_batch.to(self.device)
+            X_batch = X_batch.to(self.device, non_blocking=True)
+            y_class_batch = y_class_batch.to(self.device, non_blocking=True)
+            y_reg_batch = y_reg_batch.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad()
 
-            # Forward pass
-            if hasattr(self.model, 'attention'):  # TransformerLSTM
-                class_logits, reg_pred, _ = self.model(X_batch)
-            else:  # LightweightLSTM
-                class_logits, reg_pred = self.model(X_batch)
+            # Mixed precision forward pass
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Forward pass
+                if hasattr(self.model, 'attention'):  # TransformerLSTM
+                    class_logits, reg_pred, _ = self.model(X_batch)
+                else:  # LightweightLSTM
+                    class_logits, reg_pred = self.model(X_batch)
 
-            # Multi-task loss
-            loss_class = self.criterion_class(class_logits, y_class_batch)
-            loss_reg = self.criterion_reg(reg_pred, y_reg_batch)
+                # Multi-task loss
+                loss_class = self.criterion_class(class_logits, y_class_batch)
+                loss_reg = self.criterion_reg(reg_pred, y_reg_batch)
 
-            # Combined loss (classification weighted higher)
-            loss = loss_class + 0.3 * loss_reg
+                # Combined loss (classification weighted higher)
+                loss = loss_class + 0.3 * loss_reg
 
-            loss.backward()
-
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-            self.optimizer.step()
+            # Mixed precision backward pass
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                # Gradient clipping
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
 
             total_loss += loss.item()
             n_batches += 1
@@ -114,7 +127,7 @@ class TradingModelTrainer:
 
     @torch.no_grad()
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
-        """Validate model"""
+        """Validate model with mixed precision"""
         self.model.eval()
 
         total_loss = 0
@@ -123,20 +136,22 @@ class TradingModelTrainer:
         n_batches = 0
 
         for X_batch, y_class_batch, y_reg_batch in val_loader:
-            X_batch = X_batch.to(self.device)
-            y_class_batch = y_class_batch.to(self.device)
-            y_reg_batch = y_reg_batch.to(self.device)
+            X_batch = X_batch.to(self.device, non_blocking=True)
+            y_class_batch = y_class_batch.to(self.device, non_blocking=True)
+            y_reg_batch = y_reg_batch.to(self.device, non_blocking=True)
 
-            # Forward pass
-            if hasattr(self.model, 'attention'):
-                class_logits, reg_pred, _ = self.model(X_batch)
-            else:
-                class_logits, reg_pred = self.model(X_batch)
+            # Mixed precision forward pass
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Forward pass
+                if hasattr(self.model, 'attention'):
+                    class_logits, reg_pred, _ = self.model(X_batch)
+                else:
+                    class_logits, reg_pred = self.model(X_batch)
 
-            # Loss
-            loss_class = self.criterion_class(class_logits, y_class_batch)
-            loss_reg = self.criterion_reg(reg_pred, y_reg_batch)
-            loss = loss_class + 0.3 * loss_reg
+                # Loss
+                loss_class = self.criterion_class(class_logits, y_class_batch)
+                loss_reg = self.criterion_reg(reg_pred, y_reg_batch)
+                loss = loss_class + 0.3 * loss_reg
 
             total_loss += loss.item()
             n_batches += 1
@@ -209,6 +224,7 @@ class TradingModelTrainer:
         patience_counter = 0
 
         print(f"Training on device: {self.device}")
+        print(f"Mixed precision (AMP): {'Enabled' if self.use_amp else 'Disabled'}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
 
         for epoch in range(epochs):
@@ -283,7 +299,8 @@ def prepare_dataloaders(
     batch_size: int = 32,
     val_split: float = 0.2,
     max_rows: int = None,
-    lookback: int = 30
+    lookback: int = 30,
+    num_workers: int = 0
 ) -> Tuple[DataLoader, DataLoader, TradingDataPreprocessor]:
     """
     Load data from CSV and create train/val dataloaders
@@ -349,9 +366,21 @@ def prepare_dataloaders(
     train_dataset = TradingDataset(X_train, y_class_train, y_reg_train)
     val_dataset = TradingDataset(X_val, y_class_val, y_reg_val)
 
-    # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    # Create dataloaders with GPU optimizations
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True  # Faster GPU transfer
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
 
     return train_loader, val_loader, preprocessor
 
@@ -361,14 +390,15 @@ if __name__ == '__main__':
     print("Training LSTM/Transformer Trading Model")
     print("=" * 50)
 
-    # Configuration
-    MODEL_TYPE = 'lightweight_lstm'  # Use lighter model to prevent OOM
+    # Configuration - GPU Optimized
+    MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model for GPU
     DATA_PATH = '../data/training_data.csv'  # Path relative to trading_model/
     SAVE_DIR = 'checkpoints'
-    BATCH_SIZE = 16  # Reduced to save memory - allows using all data
-    EPOCHS = 100
+    BATCH_SIZE = 128  # Large batch for GPU efficiency
+    EPOCHS = 200  # More epochs with early stopping
     LEARNING_RATE = 0.001
-    LOOKBACK = 30  # Balance between context and memory
+    LOOKBACK = 50  # Longer context for better predictions
+    NUM_WORKERS = 4  # Parallel data loading
 
     # Prepare data - use all available data
     train_loader, val_loader, preprocessor = prepare_dataloaders(
@@ -376,22 +406,34 @@ if __name__ == '__main__':
         batch_size=BATCH_SIZE,
         val_split=0.2,
         max_rows=None,  # Use all data
-        lookback=LOOKBACK
+        lookback=LOOKBACK,
+        num_workers=NUM_WORKERS
     )
 
     # Save preprocessor
     preprocessor.save(f'{SAVE_DIR}/preprocessor.pkl')
     print(f"Saved preprocessor to {SAVE_DIR}/preprocessor.pkl")
 
-    # Create model
+    # Create model - GPU optimized
     input_size = len(preprocessor.feature_columns)
-    model = create_model(
-        model_type=MODEL_TYPE,
-        input_size=input_size,
-        hidden_size=64,  # Reduced from 128 to save memory
-        num_layers=2,  # For lightweight_lstm
-        dropout=0.3
-    )
+    if MODEL_TYPE == 'transformer_lstm':
+        model = create_model(
+            model_type=MODEL_TYPE,
+            input_size=input_size,
+            hidden_size=256,  # Larger for GPU
+            num_lstm_layers=3,
+            num_transformer_layers=4,
+            num_heads=8,
+            dropout=0.2
+        )
+    else:
+        model = create_model(
+            model_type=MODEL_TYPE,
+            input_size=input_size,
+            hidden_size=128,
+            num_layers=3,
+            dropout=0.2
+        )
 
     print(f"\nCreated {MODEL_TYPE} model with {input_size} input features")
 
@@ -401,13 +443,13 @@ if __name__ == '__main__':
         learning_rate=LEARNING_RATE
     )
 
-    # Train
+    # Train with GPU optimizations
     history = trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=EPOCHS,
         save_dir=SAVE_DIR,
-        early_stopping_patience=15
+        early_stopping_patience=25  # More patience for larger model
     )
 
     print("\nTraining complete!")
