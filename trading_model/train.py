@@ -426,16 +426,16 @@ if __name__ == '__main__':
     print("=" * 50)
     sys.stdout.flush()
 
-    # Configuration - Conservative start, then optimize
+    # Configuration - Optimized for RTX 5090 + 15 vCPUs
     MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model
     DATA_PATH = '../data/training_data.csv'  # Path relative to trading_model/
     SAVE_DIR = 'checkpoints'
-    BATCH_SIZE = 128  # Start conservative
+    BATCH_SIZE = 256  # Larger batch for RTX 5090
     GRADIENT_ACCUM_STEPS = 1  # No need with 33GB VRAM
     EPOCHS = 200  # More epochs with early stopping
     LEARNING_RATE = 0.001
     LOOKBACK = 50  # Start with 50, can increase later
-    NUM_WORKERS = 0  # Start with 0 to avoid multiprocessing issues
+    NUM_WORKERS = 8  # Use 8 workers to feed GPU faster
 
     print("\n" + "="*60)
     print("LOADING DATA...")
