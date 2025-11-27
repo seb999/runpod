@@ -95,9 +95,11 @@ class TradingModelTrainer:
         # Count each class
         class_counts = np.bincount(all_labels)
 
-        # Calculate weights: inverse of frequency
+        # Calculate weights: square root of inverse frequency (softer weighting)
+        # This prevents over-compensation for minority classes
         total = len(all_labels)
-        weights = total / (len(class_counts) * class_counts)
+        inverse_freq = total / (len(class_counts) * class_counts)
+        weights = np.sqrt(inverse_freq)  # Softer weights
 
         # Convert to tensor
         self.class_weights = torch.FloatTensor(weights).to(self.device)
