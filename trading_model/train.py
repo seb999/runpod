@@ -43,11 +43,13 @@ class TradingModelTrainer:
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         learning_rate: float = 0.001,
         weight_decay: float = 1e-5,
-        use_amp: bool = True  # Mixed precision training
+        use_amp: bool = True,  # Mixed precision training
+        gradient_accumulation_steps: int = 1  # Simulate larger batches
     ):
         self.model = model.to(device)
         self.device = device
         self.use_amp = use_amp and device == 'cuda'
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
         self.optimizer = optim.AdamW(
             model.parameters(),
@@ -80,17 +82,15 @@ class TradingModelTrainer:
         }
 
     def train_epoch(self, train_loader: DataLoader) -> float:
-        """Train for one epoch with mixed precision"""
+        """Train for one epoch with mixed precision and gradient accumulation"""
         self.model.train()
         total_loss = 0
         n_batches = 0
 
-        for X_batch, y_class_batch, y_reg_batch in train_loader:
+        for batch_idx, (X_batch, y_class_batch, y_reg_batch) in enumerate(train_loader):
             X_batch = X_batch.to(self.device, non_blocking=True)
             y_class_batch = y_class_batch.to(self.device, non_blocking=True)
             y_reg_batch = y_reg_batch.to(self.device, non_blocking=True)
-
-            self.optimizer.zero_grad()
 
             # Mixed precision forward pass
             with torch.cuda.amp.autocast(enabled=self.use_amp):
@@ -105,22 +105,29 @@ class TradingModelTrainer:
                 loss_reg = self.criterion_reg(reg_pred, y_reg_batch)
 
                 # Combined loss (classification weighted higher)
-                loss = loss_class + 0.3 * loss_reg
+                loss = (loss_class + 0.3 * loss_reg) / self.gradient_accumulation_steps
 
             # Mixed precision backward pass
             if self.use_amp:
                 self.scaler.scale(loss).backward()
-                # Gradient clipping
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
 
-            total_loss += loss.item()
+            # Only update weights every N steps
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                if self.use_amp:
+                    # Gradient clipping
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+
+                self.optimizer.zero_grad()
+
+            total_loss += loss.item() * self.gradient_accumulation_steps
             n_batches += 1
 
         return total_loss / n_batches
@@ -390,15 +397,16 @@ if __name__ == '__main__':
     print("Training LSTM/Transformer Trading Model")
     print("=" * 50)
 
-    # Configuration - GPU Optimized
+    # Configuration - Memory-safe GPU settings
     MODEL_TYPE = 'transformer_lstm'  # Full transformer-LSTM model for GPU
     DATA_PATH = '../data/training_data.csv'  # Path relative to trading_model/
     SAVE_DIR = 'checkpoints'
-    BATCH_SIZE = 128  # Large batch for GPU efficiency
+    BATCH_SIZE = 32  # Conservative batch size to avoid OOM
+    GRADIENT_ACCUM_STEPS = 4  # Simulates batch_size=128 (32*4)
     EPOCHS = 200  # More epochs with early stopping
     LEARNING_RATE = 0.001
     LOOKBACK = 50  # Longer context for better predictions
-    NUM_WORKERS = 4  # Parallel data loading
+    NUM_WORKERS = 2  # Reduced workers to save memory
 
     # Prepare data - use all available data
     train_loader, val_loader, preprocessor = prepare_dataloaders(
@@ -414,16 +422,16 @@ if __name__ == '__main__':
     preprocessor.save(f'{SAVE_DIR}/preprocessor.pkl')
     print(f"Saved preprocessor to {SAVE_DIR}/preprocessor.pkl")
 
-    # Create model - GPU optimized
+    # Create model - Memory-safe configuration
     input_size = len(preprocessor.feature_columns)
     if MODEL_TYPE == 'transformer_lstm':
         model = create_model(
             model_type=MODEL_TYPE,
             input_size=input_size,
-            hidden_size=256,  # Larger for GPU
-            num_lstm_layers=3,
-            num_transformer_layers=4,
-            num_heads=8,
+            hidden_size=128,  # Conservative size to avoid OOM
+            num_lstm_layers=2,
+            num_transformer_layers=2,
+            num_heads=4,
             dropout=0.2
         )
     else:
@@ -431,17 +439,20 @@ if __name__ == '__main__':
             model_type=MODEL_TYPE,
             input_size=input_size,
             hidden_size=128,
-            num_layers=3,
+            num_layers=2,
             dropout=0.2
         )
 
     print(f"\nCreated {MODEL_TYPE} model with {input_size} input features")
 
-    # Create trainer
+    # Create trainer with gradient accumulation
     trainer = TradingModelTrainer(
         model=model,
-        learning_rate=LEARNING_RATE
+        learning_rate=LEARNING_RATE,
+        gradient_accumulation_steps=GRADIENT_ACCUM_STEPS
     )
+
+    print(f"Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM_STEPS} (batch={BATCH_SIZE}, accum={GRADIENT_ACCUM_STEPS})")
 
     # Train with GPU optimizations
     history = trainer.train(
