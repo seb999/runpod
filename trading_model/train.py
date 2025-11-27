@@ -467,6 +467,11 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("SAVING PREPROCESSOR...")
     print("="*60)
+
+    # Create checkpoint directory if it doesn't exist
+    from pathlib import Path
+    Path(SAVE_DIR).mkdir(exist_ok=True)
+
     preprocessor.save(f'{SAVE_DIR}/preprocessor.pkl')
     print(f"✓ Saved to {SAVE_DIR}/preprocessor.pkl")
 
