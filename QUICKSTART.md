@@ -31,23 +31,30 @@ source venv/bin/activate
 
 ### 2. Collect Training Data
 
-**Option A: Fetch from Binance (Recommended for testing)**
+**RECOMMENDED: Fetch multi-year data and balance it**
 
-Fetch 6 months of data:
+This approach collects data from both bull and bear markets, then balances classes to 1/3-1/3-1/3:
+
+```bash
+# Step 1: Fetch 5 years of data from Binance (covers both bull and bear markets)
+./venv/bin/python trading_model/utils/collect_data.py \
+  --start-date 2020-01-01 \
+  --end-date 2025-01-01 \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT \
+  --interval 30m \
+  --output data/training_data_raw.csv
+
+# Step 2: Balance the dataset to equal class distribution (1/3 DOWN, 1/3 SIDEWAYS, 1/3 UP)
+./venv/bin/python trading_model/utils/balance_dataset.py \
+  --input data/training_data_raw.csv \
+  --output data/training_data.csv
+```
+
+**Alternative: Quick test with 6 months (not recommended for production)**
 ```bash
 ./venv/bin/python trading_model/utils/collect_data.py \
   --months 6 \
   --symbols BTCUSDT ETHUSDT BNBUSDT \
-  --interval 30m \
-  --output data/training_data.csv
-```
-
-Fetch specific date range:
-```bash
-./venv/bin/python trading_model/utils/collect_data.py \
-  --start-date 2024-06-01 \
-  --end-date 2025-01-01 \
-  --symbols BTCUSDT ETHUSDT \
   --interval 30m \
   --output data/training_data.csv
 ```
