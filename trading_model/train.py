@@ -57,9 +57,10 @@ class TradingModelTrainer:
             weight_decay=weight_decay
         )
 
+        # Use val loss to drive LR reduction (more standard than accuracy)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            mode='max',
+            mode='min',
             patience=5,
             factor=0.5
         )
@@ -83,23 +84,30 @@ class TradingModelTrainer:
 
     def set_class_weights(self, train_loader: DataLoader):
         """
-        Calculate class weights from training data to handle imbalance
-        Inverse frequency weighting: rare classes get higher weight
+        Calculate class weights from training data to handle imbalance.
+        Uses inverse frequency with smoothing and normalization for stability.
         """
         all_labels = []
         for _, y_class, _ in train_loader:
-            all_labels.extend(y_class.numpy())
+            all_labels.extend(y_class.cpu().numpy())
 
-        all_labels = np.array(all_labels)
+        all_labels = np.array(all_labels, dtype=np.int64)
+        if all_labels.size == 0:
+            raise ValueError("Training loader contains no labels")
 
-        # Count each class
-        class_counts = np.bincount(all_labels)
+        # Count each class (ensure we cover all 3 classes)
+        class_counts = np.bincount(all_labels, minlength=3).astype(np.float64)
 
-        # Calculate weights: square root of inverse frequency (softer weighting)
-        # This prevents over-compensation for minority classes
-        total = len(all_labels)
-        inverse_freq = total / (len(class_counts) * class_counts)
-        weights = np.sqrt(inverse_freq)  # Softer weights
+        # Add tiny smoothing to avoid division by zero
+        eps = 1e-6
+        smoothed_counts = class_counts + eps
+
+        # Inverse frequency weighting, normalized so mean weight == 1
+        inv_freq = 1.0 / smoothed_counts
+        weights = inv_freq * (smoothed_counts.mean())
+
+        # Apply sqrt to soften the weighting (prevents over-compensation)
+        weights = np.sqrt(weights)
 
         # Convert to tensor
         self.class_weights = torch.FloatTensor(weights).to(self.device)
@@ -107,11 +115,11 @@ class TradingModelTrainer:
         # Create weighted loss
         self.criterion_class = nn.CrossEntropyLoss(weight=self.class_weights)
 
-        print(f"\nClass distribution in training data:")
-        for i, (count, weight) in enumerate(zip(class_counts, weights)):
+        print(f"\nClass distribution in training data (N={len(all_labels)}):")
+        for i, count in enumerate(class_counts):
             class_name = ['DOWN', 'SIDEWAYS', 'UP'][i]
-            pct = (count / total) * 100
-            print(f"  {class_name:10s}: {count:7,} ({pct:5.2f}%) - weight: {weight:.3f}")
+            pct = (count / len(all_labels)) * 100
+            print(f"  {class_name:10s}: {int(count):7,} ({pct:5.2f}%) - weight: {weights[i]:.4f}")
         print()
 
     def train_epoch(self, train_loader: DataLoader) -> float:
@@ -205,14 +213,16 @@ class TradingModelTrainer:
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
 
-        accuracy = (all_preds == all_labels).mean()
+        accuracy = float((all_preds == all_labels).mean()) if all_labels.size > 0 else 0.0
 
-        # Per-class accuracy
+        # Per-class accuracy (handle missing classes)
         class_accuracies = {}
         for cls in [0, 1, 2]:  # DOWN, SIDEWAYS, UP
             mask = all_labels == cls
             if mask.sum() > 0:
-                class_accuracies[cls] = (all_preds[mask] == all_labels[mask]).mean()
+                class_accuracies[cls] = float((all_preds[mask] == all_labels[mask]).mean())
+            else:
+                class_accuracies[cls] = None  # No examples in validation set
 
         # F1-score (macro average)
         f1_scores = []
@@ -257,10 +267,10 @@ class TradingModelTrainer:
             Training history dictionary
         """
         save_path = Path(save_dir)
-        save_path.mkdir(exist_ok=True)
+        save_path.mkdir(parents=True, exist_ok=True)
 
-        best_val_acc = 0
-        best_val_f1 = 0
+        best_val_f1 = -1.0
+        best_val_acc = -1.0
         patience_counter = 0
 
         print(f"Training on device: {self.device}")
@@ -270,15 +280,15 @@ class TradingModelTrainer:
         # Calculate class weights to handle imbalanced data
         self.set_class_weights(train_loader)
 
-        for epoch in range(epochs):
+        for epoch in range(1, epochs + 1):
             # Train
             train_loss = self.train_epoch(train_loader)
 
             # Validate
             val_metrics = self.validate(val_loader)
 
-            # Update scheduler
-            self.scheduler.step(val_metrics['accuracy'])
+            # Update scheduler with val loss (minimization)
+            self.scheduler.step(val_metrics['loss'])
 
             # Record history
             self.history['train_loss'].append(train_loss)
@@ -288,20 +298,28 @@ class TradingModelTrainer:
             self.history['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
 
             # Print progress
-            print(f"Epoch {epoch+1}/{epochs}")
-            print(f"  Train Loss: {train_loss:.4f}")
-            print(f"  Val Loss: {val_metrics['loss']:.4f}")
-            print(f"  Val Accuracy: {val_metrics['accuracy']:.4f}")
-            print(f"  Val F1: {val_metrics['f1']:.4f}")
-            print(f"  Class Accuracies: DOWN={val_metrics['class_accuracies'].get(0, 0):.3f}, "
-                  f"SIDEWAYS={val_metrics['class_accuracies'].get(1, 0):.3f}, "
-                  f"UP={val_metrics['class_accuracies'].get(2, 0):.3f}")
-            print(f"  LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+            print(f"Epoch {epoch}/{epochs}")
+            print(f"  Train Loss: {train_loss:.6f}")
+            print(f"  Val Loss: {val_metrics['loss']:.6f}")
+            print(f"  Val Accuracy: {val_metrics['accuracy']:.6f}")
+            print(f"  Val F1: {val_metrics['f1']:.6f}")
 
-            # Save best model
-            if val_metrics['accuracy'] > best_val_acc:
-                best_val_acc = val_metrics['accuracy']
+            # Format class accuracies (handle None values)
+            class_acc_parts = []
+            for cls, name in enumerate(['DOWN', 'SIDEWAYS', 'UP']):
+                acc = val_metrics['class_accuracies'].get(cls)
+                if acc is not None:
+                    class_acc_parts.append(f"{name}={acc:.3f}")
+                else:
+                    class_acc_parts.append(f"{name}=None")
+            print(f"  Class Accuracies: {', '.join(class_acc_parts)}")
+            print(f"  LR: {self.optimizer.param_groups[0]['lr']:.8f}")
+
+            # Save best model by F1 (primary metric)
+            saved = False
+            if val_metrics['f1'] > best_val_f1:
                 best_val_f1 = val_metrics['f1']
+                best_val_acc = val_metrics['accuracy']
                 patience_counter = 0
 
                 checkpoint = {
@@ -312,26 +330,40 @@ class TradingModelTrainer:
                     'val_f1': val_metrics['f1'],
                     'history': self.history
                 }
-
                 torch.save(checkpoint, save_path / 'best_model.pt')
-                print(f"  ✓ Saved best model (acc={val_metrics['accuracy']:.4f}, f1={val_metrics['f1']:.4f})")
+                print(f"  ✓ Saved best model by F1 (f1={val_metrics['f1']:.4f}, acc={val_metrics['accuracy']:.4f})")
+                saved = True
             else:
                 patience_counter += 1
 
-            # Early stopping
+            # Also save best accuracy separately (optional)
+            if val_metrics['accuracy'] > best_val_acc and not saved:
+                best_val_acc = val_metrics['accuracy']
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_accuracy': val_metrics['accuracy'],
+                    'val_f1': val_metrics['f1'],
+                    'history': self.history
+                }, save_path / 'best_model_by_acc.pt')
+                print(f"  ✓ Saved best model by Accuracy (acc={val_metrics['accuracy']:.4f})")
+
+            # Early stopping based on F1
             if patience_counter >= early_stopping_patience:
-                print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                print(f"\nEarly stopping triggered after epoch {epoch} (no F1 improvement in {early_stopping_patience} epochs)")
                 break
 
             print()
 
-        print(f"\nTraining completed!")
-        print(f"Best validation accuracy: {best_val_acc:.4f}")
-        print(f"Best validation F1: {best_val_f1:.4f}")
-
-        # Save final history
+        # Save final model & history
+        torch.save({'model_state_dict': self.model.state_dict()}, save_path / 'final_model.pt')
         with open(save_path / 'history.json', 'w') as f:
             json.dump(self.history, f, indent=2)
+
+        print(f"\nTraining completed!")
+        print(f"Best validation F1: {best_val_f1:.6f}")
+        print(f"Best validation accuracy: {best_val_acc:.6f}")
 
         return self.history
 
