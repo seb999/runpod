@@ -319,23 +319,23 @@ class TradingModelTrainer:
             saved = False
             if val_metrics['f1'] > best_val_f1:
                 best_val_f1 = val_metrics['f1']
-            best_val_acc = val_metrics['accuracy']
-            patience_counter = 0
+                best_val_acc = val_metrics['accuracy']
+                patience_counter = 0
 
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'val_accuracy': val_metrics['accuracy'],
-                'val_f1': val_metrics['f1'],
-                'history': self.history,
-                'model_type': getattr(self.model, 'model_type', None),
-                'model_kwargs': getattr(self.model, 'model_kwargs', None)
-            }
-            torch.save(checkpoint, save_path / 'best_model.pt')
-            print(f"  ✓ Saved best model by F1 (f1={val_metrics['f1']:.4f}, acc={val_metrics['accuracy']:.4f})")
-            saved = True
-        else:
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_accuracy': val_metrics['accuracy'],
+                    'val_f1': val_metrics['f1'],
+                    'history': self.history,
+                    'model_type': getattr(self.model, 'model_type', None),
+                    'model_kwargs': getattr(self.model, 'model_kwargs', None)
+                }
+                torch.save(checkpoint, save_path / 'best_model.pt')
+                print(f"  ✓ Saved best model by F1 (f1={val_metrics['f1']:.4f}, acc={val_metrics['accuracy']:.4f})")
+                saved = True
+            else:
                 patience_counter += 1
 
             # Also save best accuracy separately (optional)
