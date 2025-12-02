@@ -17,6 +17,34 @@ from models.transformer_lstm import create_model
 from utils.preprocessor import TradingDataPreprocessor
 
 
+class FocalLoss(nn.Module):
+    """Focal Loss for multi-class classification to focus on hard examples"""
+
+    def __init__(self, gamma: float = 1.5, weight: torch.Tensor = None, reduction: str = 'mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = nn.functional.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+        focal_factor = (1 - probs) ** self.gamma
+        loss = -focal_factor * log_probs
+
+        if self.weight is not None:
+            loss = loss * self.weight
+
+        loss = loss.gather(1, targets.unsqueeze(1)).squeeze(1)
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 class TradingDataset(Dataset):
     """PyTorch Dataset for trading sequences"""
 
@@ -44,12 +72,16 @@ class TradingModelTrainer:
         learning_rate: float = 0.001,
         weight_decay: float = 1e-5,
         use_amp: bool = True,  # Mixed precision training
-        gradient_accumulation_steps: int = 1  # Simulate larger batches
+        gradient_accumulation_steps: int = 1,  # Simulate larger batches
+        use_focal_loss: bool = True,
+        focal_gamma: float = 1.5
     ):
         self.model = model.to(device)
         self.device = device
         self.use_amp = use_amp and device == 'cuda'
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
 
         self.optimizer = optim.AdamW(
             model.parameters(),
@@ -125,8 +157,11 @@ class TradingModelTrainer:
         # Convert to tensor
         self.class_weights = torch.FloatTensor(weights).to(self.device)
 
-        # Create weighted loss
-        self.criterion_class = nn.CrossEntropyLoss(weight=self.class_weights)
+        # Create weighted loss (Focal or CrossEntropy)
+        if self.use_focal_loss:
+            self.criterion_class = FocalLoss(gamma=self.focal_gamma, weight=self.class_weights)
+        else:
+            self.criterion_class = nn.CrossEntropyLoss(weight=self.class_weights)
 
         print(f"\nClass distribution in training data (N={len(all_labels)}):")
         for i, count in enumerate(class_counts):
@@ -147,7 +182,11 @@ class TradingModelTrainer:
             y_reg_batch = y_reg_batch.to(self.device, non_blocking=True)
 
             # Mixed precision forward pass
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            try:
+                autocast_ctx = torch.amp.autocast('cuda', enabled=self.use_amp)
+            except TypeError:
+                autocast_ctx = torch.cuda.amp.autocast(enabled=self.use_amp)
+            with autocast_ctx:
                 # Forward pass
                 if hasattr(self.model, 'attention'):  # TransformerLSTM
                     class_logits, reg_pred, _ = self.model(X_batch)
@@ -202,7 +241,11 @@ class TradingModelTrainer:
             y_reg_batch = y_reg_batch.to(self.device, non_blocking=True)
 
             # Mixed precision forward pass
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            try:
+                autocast_ctx = torch.amp.autocast('cuda', enabled=self.use_amp)
+            except TypeError:
+                autocast_ctx = torch.cuda.amp.autocast(enabled=self.use_amp)
+            with autocast_ctx:
                 # Forward pass
                 if hasattr(self.model, 'attention'):
                     class_logits, reg_pred, _ = self.model(X_batch)
@@ -616,7 +659,9 @@ if __name__ == '__main__':
         trainer = TradingModelTrainer(
             model=model,
             learning_rate=LEARNING_RATE,
-            gradient_accumulation_steps=GRADIENT_ACCUM_STEPS
+            gradient_accumulation_steps=GRADIENT_ACCUM_STEPS,
+            use_focal_loss=True,
+            focal_gamma=1.5
         )
         print(f"✓ Trainer initialized")
         print(f"  Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM_STEPS}")
