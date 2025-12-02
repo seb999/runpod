@@ -66,7 +66,7 @@ class TradingModelTrainer:
         )
 
         # Mixed precision scaler
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler(device_type='cuda') if self.use_amp else None
 
         # Loss functions (with class weights for imbalanced data)
         self.criterion_class = None  # Will be set with weights
@@ -109,10 +109,10 @@ class TradingModelTrainer:
         # Apply sqrt to soften the weighting (prevents over-compensation)
         weights = np.sqrt(weights)
 
-        # Gently boost rarer/ambiguous classes to combat early collapse
-        # SIDEWAYS is usually hardest; bump it more than DOWN.
-        weights[0] *= 1.2  # DOWN
-        weights[1] *= 1.5  # SIDEWAYS
+        # Mildly boost each class to reduce bias toward any single class
+        weights[0] *= 1.1  # DOWN
+        weights[1] *= 1.2  # SIDEWAYS
+        weights[2] *= 1.1  # UP
 
         # Convert to tensor
         self.class_weights = torch.FloatTensor(weights).to(self.device)
@@ -523,7 +523,7 @@ if __name__ == '__main__':
     BATCH_SIZE = 256  # Larger batch for RTX 5090
     GRADIENT_ACCUM_STEPS = 1  # No need with 33GB VRAM
     EPOCHS = 200  # More epochs with early stopping
-    LEARNING_RATE = 0.0005
+    LEARNING_RATE = 0.0003
     LOOKBACK = 50  # Start with 50, can increase later
     NUM_WORKERS = 8  # Use 8 workers to feed GPU faster
 
