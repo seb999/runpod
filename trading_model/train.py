@@ -117,10 +117,10 @@ class TradingModelTrainer:
         # Apply sqrt to soften the weighting (prevents over-compensation)
         weights = np.sqrt(weights)
 
-        # Mildly boost each class to reduce bias toward any single class
-        weights[0] *= 1.1  # DOWN
-        weights[1] *= 1.2  # SIDEWAYS
-        weights[2] *= 1.1  # UP
+        # Mild boost to reduce bias without overcorrecting
+        weights[0] *= 1.05  # DOWN
+        weights[1] *= 1.15  # SIDEWAYS
+        weights[2] *= 1.05  # UP
 
         # Convert to tensor
         self.class_weights = torch.FloatTensor(weights).to(self.device)
@@ -531,7 +531,7 @@ if __name__ == '__main__':
     BATCH_SIZE = 256  # Larger batch for RTX 5090
     GRADIENT_ACCUM_STEPS = 1  # No need with 33GB VRAM
     EPOCHS = 200  # More epochs with early stopping
-    LEARNING_RATE = 0.0003
+    LEARNING_RATE = 0.0002
     LOOKBACK = 50  # Start with 50, can increase later
     NUM_WORKERS = 8  # Use 8 workers to feed GPU faster
 
