@@ -21,8 +21,10 @@ Your Python environment is ready at `ML/venv/`
 
 ```bash
 cd ML
-python3 -m venv venv
-source activate.sh
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pyhton /trading_model/train.py
 ```
 
 Or manually:
