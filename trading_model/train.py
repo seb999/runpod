@@ -319,21 +319,23 @@ class TradingModelTrainer:
             saved = False
             if val_metrics['f1'] > best_val_f1:
                 best_val_f1 = val_metrics['f1']
-                best_val_acc = val_metrics['accuracy']
-                patience_counter = 0
+            best_val_acc = val_metrics['accuracy']
+            patience_counter = 0
 
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_accuracy': val_metrics['accuracy'],
-                    'val_f1': val_metrics['f1'],
-                    'history': self.history
-                }
-                torch.save(checkpoint, save_path / 'best_model.pt')
-                print(f"  ✓ Saved best model by F1 (f1={val_metrics['f1']:.4f}, acc={val_metrics['accuracy']:.4f})")
-                saved = True
-            else:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'val_accuracy': val_metrics['accuracy'],
+                'val_f1': val_metrics['f1'],
+                'history': self.history,
+                'model_type': getattr(self.model, 'model_type', None),
+                'model_kwargs': getattr(self.model, 'model_kwargs', None)
+            }
+            torch.save(checkpoint, save_path / 'best_model.pt')
+            print(f"  ✓ Saved best model by F1 (f1={val_metrics['f1']:.4f}, acc={val_metrics['accuracy']:.4f})")
+            saved = True
+        else:
                 patience_counter += 1
 
             # Also save best accuracy separately (optional)
@@ -345,7 +347,9 @@ class TradingModelTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_accuracy': val_metrics['accuracy'],
                     'val_f1': val_metrics['f1'],
-                    'history': self.history
+                    'history': self.history,
+                    'model_type': getattr(self.model, 'model_type', None),
+                    'model_kwargs': getattr(self.model, 'model_kwargs', None)
                 }, save_path / 'best_model_by_acc.pt')
                 print(f"  ✓ Saved best model by Accuracy (acc={val_metrics['accuracy']:.4f})")
 
@@ -357,7 +361,12 @@ class TradingModelTrainer:
             print()
 
         # Save final model & history
-        torch.save({'model_state_dict': self.model.state_dict()}, save_path / 'final_model.pt')
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'model_type': getattr(self.model, 'model_type', None),
+            'model_kwargs': getattr(self.model, 'model_kwargs', None),
+            'history': self.history
+        }, save_path / 'final_model.pt')
         with open(save_path / 'history.json', 'w') as f:
             json.dump(self.history, f, indent=2)
 
@@ -419,44 +428,51 @@ def prepare_dataloaders(
     print("  ✓ Preprocessor created")
     sys.stdout.flush()
 
-    # Create features and labels
-    print("  Step 3/5: Creating features and labels...")
-    sys.stdout.flush()
-    df = preprocessor.create_features(df)
-    df = preprocessor.create_labels(df)
-    print("  ✓ Features and labels created")
+    # Chronological split BEFORE labels/sequences to avoid leakage
+    split_idx = int(len(df) * (1 - val_split))
+    train_df_raw = df.iloc[:split_idx].copy()
+    val_df_raw = df.iloc[split_idx:].copy()
+
+    min_needed = preprocessor.lookback + preprocessor.forward_bars
+    if len(val_df_raw) < min_needed:
+        raise ValueError(f"Validation split too small for lookback={preprocessor.lookback} "
+                         f"and forward_bars={preprocessor.forward_bars} (need >= {min_needed} rows)")
+
+    print(f"  Train rows: {len(train_df_raw)}, Val rows: {len(val_df_raw)}")
     sys.stdout.flush()
 
-    # Create sequences
-    print("  Step 4/5: Creating sequences...")
+    # Create features and labels separately per split
+    print("  Step 3/5: Creating features and labels (train)...")
+    sys.stdout.flush()
+    train_df = preprocessor.create_features(train_df_raw)
+    train_df = preprocessor.create_labels(train_df)
+    print("  ✓ Train features/labels created")
+    sys.stdout.flush()
+
+    print("  Step 4/5: Creating features and labels (val)...")
+    sys.stdout.flush()
+    val_df = preprocessor.create_features(val_df_raw)
+    val_df = preprocessor.create_labels(val_df)
+    print("  ✓ Val features/labels created")
+    sys.stdout.flush()
+
+    # Create sequences per split to keep history/labels inside split
+    print("  Step 5/5: Creating sequences and scaling...")
     sys.stdout.flush()
     feature_cols = preprocessor.get_feature_columns()
-    X, y_class, y_reg = preprocessor.create_sequences(df, feature_cols)
 
-    print(f"  ✓ Created {len(X)} sequences")
-    print(f"    Input shape: {X.shape}")
-    print(f"    Label distribution: DOWN={np.sum(y_class==0)}, SIDEWAYS={np.sum(y_class==1)}, UP={np.sum(y_class==2)}")
+    X_train_raw, y_class_train, y_reg_train = preprocessor.create_sequences(train_df, feature_cols)
+    X_val_raw, y_class_val, y_reg_val = preprocessor.create_sequences(val_df, feature_cols)
+
+    print(f"  ✓ Created sequences (train={len(X_train_raw)}, val={len(X_val_raw)})")
+    print(f"    Train label distribution: DOWN={np.sum(y_class_train==0)}, SIDEWAYS={np.sum(y_class_train==1)}, UP={np.sum(y_class_train==2)}")
+    print(f"    Val label distribution:   DOWN={np.sum(y_class_val==0)}, SIDEWAYS={np.sum(y_class_val==1)}, UP={np.sum(y_class_val==2)}")
     sys.stdout.flush()
 
-    # Fit scaler on training data only
-    print("  Step 5/5: Scaling data and creating dataloaders...")
-    sys.stdout.flush()
-
-    split_idx = int(len(X) * (1 - val_split))
-    X_train_raw = X[:split_idx]
-    X_val_raw = X[split_idx:]
-
+    # Fit scaler on training data only, then transform both splits
     preprocessor.fit_scaler(X_train_raw)
-
-    # Transform data
     X_train = preprocessor.transform(X_train_raw)
     X_val = preprocessor.transform(X_val_raw)
-
-    y_class_train = y_class[:split_idx]
-    y_class_val = y_class[split_idx:]
-
-    y_reg_train = y_reg[:split_idx]
-    y_reg_val = y_reg[split_idx:]
 
     # Create datasets
     train_dataset = TradingDataset(X_train, y_class_train, y_reg_train)

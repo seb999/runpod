@@ -21,6 +21,7 @@ Your Python environment is ready at `ML/venv/`
 
 ```bash
 cd ML
+python3 -m venv venv
 source activate.sh
 ```
 
