@@ -66,7 +66,15 @@ class TradingModelTrainer:
         )
 
         # Mixed precision scaler
-        self.scaler = torch.amp.GradScaler(device_type='cuda') if self.use_amp else None
+        if self.use_amp:
+            try:
+                # Newer PyTorch API
+                self.scaler = torch.amp.GradScaler('cuda')
+            except TypeError:
+                # Fallback for older versions
+                self.scaler = torch.cuda.amp.GradScaler()
+        else:
+            self.scaler = None
 
         # Loss functions (with class weights for imbalanced data)
         self.criterion_class = None  # Will be set with weights
